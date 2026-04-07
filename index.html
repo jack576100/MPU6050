@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能負重計數器 - BLE 版</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .gradient-bg {
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        }
+        .count-display {
+            font-size: 8rem;
+            text-shadow: 0 0 20px rgba(56, 189, 248, 0.5);
+        }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+    </style>
+</head>
+<body class="gradient-bg min-h-screen text-white font-sans flex flex-col items-center p-6">
+
+    <header class="w-full max-w-md text-center mb-8">
+        <h1 class="text-3xl font-bold text-sky-400">Smart Rep Counter</h1>
+        <p class="text-slate-400">硬體連線版 (ESP32 + MPU6050)</p>
+    </header>
+
+    <!-- 狀態標籤 -->
+    <div class="mb-4 bg-slate-800 px-4 py-2 rounded-full border border-slate-700 flex items-center">
+        <div id="connectionDot" class="status-dot bg-red-500"></div>
+        <span id="connectionText" class="text-xs uppercase tracking-widest text-slate-300">藍牙未連線</span>
+    </div>
+
+    <!-- 次數顯示區 -->
+    <div class="bg-slate-800/50 rounded-3xl p-8 w-full max-w-md border border-slate-700 text-center shadow-2xl mb-6">
+        <span class="text-sm uppercase tracking-widest text-slate-400">目前次數</span>
+        <div id="counter" class="count-display font-black text-sky-500">0</div>
+        <div class="flex justify-around mt-4">
+            <div class="text-center">
+                <p class="text-xs text-slate-500">即時 Z 軸</p>
+                <p id="current-z" class="text-xl font-semibold">0.00</p>
+            </div>
+            <div class="text-center">
+                <p class="text-xs text-slate-500">狀態</p>
+                <p id="status-text" class="text-xl font-semibold text-yellow-500">待機中</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 即時圖表 -->
+    <div class="w-full max-w-md bg-slate-900/50 rounded-xl p-4 border border-slate-800 mb-6">
+        <canvas id="motionChart" height="150"></canvas>
+    </div>
+
+    <!-- 控制按鈕 -->
+    <div class="w-full max-w-md space-y-4">
+        <button id="connectBtn" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-4 rounded-2xl transition-all shadow-lg active:scale-95">
+            連線至負重帶
+        </button>
+        <button id="resetBtn" class="w-full bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 rounded-2xl transition-all">
+            數值重置
+        </button>
+    </div>
+
+    <script>
+        // BLE 配置
+        const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+        const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+
+        let count = 0;
+        let bleDevice = null;
+        let bleCharacteristic = null;
+        let threshold = 12.0; 
+        let goingUp = false;
+        let chart;
+        const historyData = Array(50).fill(0);
+
+        const counterEl = document.getElementById('counter');
+        const connectBtn = document.getElementById('connectBtn');
+        const resetBtn = document.getElementById('resetBtn');
+        const statusEl = document.getElementById('status-text');
+        const zEl = document.getElementById('current-z');
+        const dotEl = document.getElementById('connectionDot');
+        const connTextEl = document.getElementById('connectionText');
+
+        function initChart() {
+            const ctx = document.getElementById('motionChart').getContext('2d');
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: Array(50).fill(''),
+                    datasets: [{
+                        label: '硬體數據流',
+                        data: historyData,
+                        borderColor: '#818cf8',
+                        borderWidth: 2,
+                        fill: false,
+                        pointRadius: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        y: { min: -5, max: 25, grid: { color: '#334155' } },
+                        x: { display: false }
+                    },
+                    plugins: { legend: { display: false } },
+                    animation: false
+                }
+            });
+        }
+
+        function speak(text) {
+            const msg = new SpeechSynthesisUtterance(text);
+            msg.lang = 'zh-TW';
+            window.speechSynthesis.speak(msg);
+        }
+
+        // 核心連線邏輯
+        async function connectBLE() {
+            try {
+                console.log('正在請求藍牙設備...');
+                const device = await navigator.bluetooth.requestDevice({
+                    filters: [{ name: 'Smart-Weight-Belt' }],
+                    optionalServices: [SERVICE_UUID]
+                });
+
+                dotEl.classList.replace('bg-red-500', 'bg-yellow-500');
+                connTextEl.innerText = "連線中...";
+
+                const server = await device.gatt.connect();
+                const service = await server.getPrimaryService(SERVICE_UUID);
+                bleCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+                // 訂閱通知
+                await bleCharacteristic.startNotifications();
+                bleCharacteristic.addEventListener('characteristicvaluechanged', handleBLEData);
+
+                dotEl.classList.replace('bg-yellow-500', 'bg-green-500');
+                connTextEl.innerText = "已連線至硬體";
+                connectBtn.innerText = "斷開連線";
+                bleDevice = device;
+
+                speak("硬體已連線");
+
+            } catch (error) {
+                console.error('連線失敗:', error);
+                dotEl.classList.replace('bg-yellow-500', 'bg-red-500');
+                connTextEl.innerText = "連線失敗";
+            }
+        }
+
+        function handleBLEData(event) {
+            const value = event.target.value;
+            // 讀取 Float32 (4 bytes)
+            const z = value.getFloat32(0, true); 
+            const absoluteZ = Math.abs(z);
+            
+            zEl.innerText = z.toFixed(2);
+
+            // 更新圖表
+            historyData.push(absoluteZ);
+            historyData.shift();
+            chart.update();
+
+            // 計數邏輯
+            if (absoluteZ > threshold && !goingUp) {
+                goingUp = true;
+                statusEl.innerText = '拉起中';
+                statusEl.classList.replace('text-yellow-500', 'text-green-400');
+            } else if (absoluteZ < (threshold - 2.5) && goingUp) {
+                goingUp = false;
+                count++;
+                counterEl.innerText = count;
+                statusEl.innerText = '已放下';
+                statusEl.classList.replace('text-green-400', 'text-yellow-500');
+                speak(count.toString());
+            }
+        }
+
+        connectBtn.addEventListener('click', () => {
+            if (!bleDevice) {
+                connectBLE();
+            } else {
+                bleDevice.gatt.disconnect();
+                bleDevice = null;
+                dotEl.classList.replace('bg-green-500', 'bg-red-500');
+                connTextEl.innerText = "已斷開";
+                connectBtn.innerText = "重新連線";
+            }
+        });
+
+        resetBtn.addEventListener('click', () => {
+            count = 0;
+            counterEl.innerText = '0';
+            speak('重置');
+        });
+
+        window.onload = initChart;
+    </script>
+</body>
+</html>
