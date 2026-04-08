@@ -176,7 +176,7 @@
             // 加上 8 小時的偏移量來計算台灣時間
             const tzOffset = 8 * 60 * 60 * 1000;
             const taiwanTime = new Date(now.getTime() + tzOffset);
-            return taiwanTime.toISOString().replace('Z', '+08:00');
+            return taiwanTime.toISOString().replace('T',' ').substr(0, 19);
         }
 
         // --- Google Sheets 互動 ---
