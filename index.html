@@ -169,6 +169,15 @@
             msg.rate = 1.0;
             window.speechSynthesis.speak(msg);
         }
+        
+        // 取得台灣時間 ISO 字串
+        function getTaiwanTimeString() {
+            const now = new Date();
+            // 加上 8 小時的偏移量來計算台灣時間
+            const tzOffset = 8 * 60 * 60 * 1000;
+            const taiwanTime = new Date(now.getTime() + tzOffset);
+            return taiwanTime.toISOString().replace('Z', '+08:00');
+        }
 
         // --- Google Sheets 互動 ---
         
@@ -210,7 +219,7 @@
                     mode: 'no-cors',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        timestamp: new Date().toISOString(),
+                        timestamp: getTaiwanTimeString(), // 使用台灣時間
                         reps: count,
                         max_threshold: threshold,
                         target_reps: targetReps
