@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智能負重計數器 - BLE 版</title>
+    <title>智能負重計數器 - 雲端激勵版</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
@@ -21,25 +21,50 @@
             display: inline-block;
             margin-right: 8px;
         }
+        @keyframes celebrate {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); color: #fbbf24; }
+            100% { transform: scale(1); }
+        }
+        .celebrate-anim {
+            animation: celebrate 0.5s ease-in-out 3;
+        }
     </style>
 </head>
 <body class="gradient-bg min-h-screen text-white font-sans flex flex-col items-center p-6">
 
-    <header class="w-full max-w-md text-center mb-8">
+    <header class="w-full max-w-md text-center mb-6">
         <h1 class="text-3xl font-bold text-sky-400">Smart Rep Counter</h1>
-        <p class="text-slate-400">硬體連線版 (ESP32 + MPU6050)</p>
+        <p class="text-slate-400 text-sm">ESP32 硬體 + 雲端目標設定</p>
     </header>
 
+    <!-- 雲端設定區 -->
+    <div class="w-full max-w-md mb-4 grid grid-cols-2 gap-2">
+        <button id="syncSettingsBtn" class="bg-slate-700 hover:bg-slate-600 text-xs py-2 rounded-lg border border-slate-600 flex items-center justify-center gap-2 transition-colors">
+            <span>🔄 讀取雲端設定</span>
+        </button>
+        <button id="uploadDataBtn" class="bg-emerald-700 hover:bg-emerald-600 text-xs py-2 rounded-lg border border-emerald-600 flex items-center justify-center gap-2 transition-colors">
+            <span>📤 上傳訓練紀錄</span>
+        </button>
+    </div>
+
     <!-- 狀態標籤 -->
-    <div class="mb-4 bg-slate-800 px-4 py-2 rounded-full border border-slate-700 flex items-center">
-        <div id="connectionDot" class="status-dot bg-red-500"></div>
-        <span id="connectionText" class="text-xs uppercase tracking-widest text-slate-300">藍牙未連線</span>
+    <div class="mb-4 bg-slate-800 px-4 py-2 rounded-full border border-slate-700 flex items-center justify-between w-full max-w-md shadow-lg">
+        <div class="flex items-center">
+            <div id="connectionDot" class="status-dot bg-red-500"></div>
+            <span id="connectionText" class="text-[10px] uppercase tracking-widest text-slate-300">藍牙未連線</span>
+        </div>
+        <div class="text-[10px] text-slate-400 space-x-2">
+            <span>臨界值: <span id="threshold-display" class="text-sky-400">6.0</span></span>
+            <span>|</span>
+            <span>目標: <span id="target-display" class="text-amber-400">10</span> 次</span>
+        </div>
     </div>
 
     <!-- 次數顯示區 -->
-    <div class="bg-slate-800/50 rounded-3xl p-8 w-full max-w-md border border-slate-700 text-center shadow-2xl mb-6">
+    <div id="counterCard" class="bg-slate-800/50 rounded-3xl p-8 w-full max-w-md border border-slate-700 text-center shadow-2xl mb-6 relative overflow-hidden">
         <span class="text-sm uppercase tracking-widest text-slate-400">目前次數</span>
-        <div id="counter" class="count-display font-black text-sky-500">0</div>
+        <div id="counter" class="count-display font-black text-sky-500 transition-all">0</div>
         <div class="flex justify-around mt-4">
             <div class="text-center">
                 <p class="text-xs text-slate-500">即時 Z 軸</p>
@@ -67,27 +92,41 @@
         </button>
     </div>
 
+    <!-- 訊息提示框 -->
+    <div id="toast" class="fixed bottom-10 bg-slate-900 border border-slate-700 px-6 py-3 rounded-xl shadow-2xl transform translate-y-20 transition-transform duration-300 opacity-0 pointer-events-none z-50">
+        <span id="toast-msg">訊息內容</span>
+    </div>
+
     <script>
-        // BLE 配置
+        // --- 設定區 ---
         const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
         const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+        // 請在此貼上您的 Google Apps Script 部署 URL
+        const GAS_URL = "https://script.google.com/macros/s/AKfycbwKYwzkdCSEtfdeiQSatMuzS2tOlGO2nj0prG1_nNZH_GIAiXKhcA2HSpQgi5Wd2Rhd/exec"; 
 
         let count = 0;
         let bleDevice = null;
         let bleCharacteristic = null;
-        let threshold = 6.0; 
+        let threshold = 6.0; //預設臨界值
+        let targetReps = 10; // 預設目標次數
         let goingUp = false;
         let chart;
         const historyData = Array(50).fill(0);
 
         const counterEl = document.getElementById('counter');
+        const counterCard = document.getElementById('counterCard');
         const connectBtn = document.getElementById('connectBtn');
         const resetBtn = document.getElementById('resetBtn');
         const statusEl = document.getElementById('status-text');
         const zEl = document.getElementById('current-z');
         const dotEl = document.getElementById('connectionDot');
         const connTextEl = document.getElementById('connectionText');
+        const thresholdEl = document.getElementById('threshold-display');
+        const targetEl = document.getElementById('target-display');
+        const syncBtn = document.getElementById('syncSettingsBtn');
+        const uploadBtn = document.getElementById('uploadDataBtn');
 
+        // 初始化圖表
         function initChart() {
             const ctx = document.getElementById('motionChart').getContext('2d');
             chart = new Chart(ctx, {
@@ -106,7 +145,7 @@
                 options: {
                     responsive: true,
                     scales: {
-                        y: { min: -5, max: 25, grid: { color: '#334155' } },
+                        y: { min: -5, max: 20, grid: { color: '#334155' } },
                         x: { display: false }
                     },
                     plugins: { legend: { display: false } },
@@ -115,16 +154,117 @@
             });
         }
 
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            document.getElementById('toast-msg').innerText = msg;
+            toast.classList.remove('translate-y-20', 'opacity-0');
+            setTimeout(() => {
+                toast.classList.add('translate-y-20', 'opacity-0');
+            }, 3000);
+        }
+
         function speak(text) {
             const msg = new SpeechSynthesisUtterance(text);
             msg.lang = 'zh-TW';
+            msg.rate = 1.0;
             window.speechSynthesis.speak(msg);
         }
 
-        // 核心連線邏輯
+        // --- Google Sheets 互動 ---
+        
+        async function fetchSettings() {
+            if (!GAS_URL) return showToast("請先設定 GAS URL");
+            try {
+                syncBtn.disabled = true;
+                const response = await fetch(GAS_URL + "?action=getSettings");
+                const data = await response.json();
+                
+                // 更新臨界值
+                if (data.threshold) {
+                    threshold = parseFloat(data.threshold);
+                    thresholdEl.innerText = threshold.toFixed(1);
+                }
+                // 更新目標次數
+                if (data.target) {
+                    targetReps = parseInt(data.target);
+                    targetEl.innerText = targetReps;
+                }
+                
+                showToast("同步成功：目標 " + targetReps + " 次");
+                speak("設定已同步");
+            } catch (e) {
+                showToast("讀取失敗，請檢查網路或 API");
+            } finally {
+                syncBtn.disabled = false;
+            }
+        }
+
+        async function uploadData() {
+            if (count === 0) return showToast("目前沒有訓練次數可上傳");
+            if (!GAS_URL) return showToast("請先設定 GAS URL");
+
+            try {
+                uploadBtn.disabled = true;
+                const response = await fetch(GAS_URL, {
+                    method: 'POST',
+                    mode: 'no-cors',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        timestamp: new Date().toISOString(),
+                        reps: count,
+                        max_threshold: threshold,
+                        target_reps: targetReps
+                    })
+                });
+                showToast("數據已備份至 Google Sheets");
+                speak("數據已成功備份");
+            } catch (e) {
+                showToast("上傳失敗");
+            } finally {
+                uploadBtn.disabled = false;
+            }
+        }
+
+        // --- 核心邏輯 ---
+
+        function handleBLEData(event) {
+            const value = event.target.value;
+            const z = value.getFloat32(0, true); 
+            const absoluteZ = Math.abs(z);
+            
+            zEl.innerText = z.toFixed(2);
+            historyData.push(absoluteZ);
+            historyData.shift();
+            chart.update();
+
+            // 計數與激勵邏輯
+            if (absoluteZ > threshold && !goingUp) {
+                goingUp = true;
+                statusEl.innerText = '拉起中';
+                statusEl.classList.replace('text-yellow-500', 'text-green-400');
+            } else if (absoluteZ < (threshold - 2.5) && goingUp) {
+                goingUp = false;
+                count++;
+                counterEl.innerText = count;
+                statusEl.innerText = '已放下';
+                statusEl.classList.replace('text-green-400', 'text-yellow-500');
+
+                // 檢查是否達成目標
+                if (count === targetReps) {
+                    counterEl.classList.add('celebrate-anim');
+                    speak("太棒了！已達成目標次數 " + targetReps + " 次，繼續保持！");
+                    showToast("🎉 目標達成！");
+                    setTimeout(() => counterEl.classList.remove('celebrate-anim'), 2000);
+                } else {
+                    speak(count.toString());
+                }
+            }
+        }
+
+        // --- 藍牙連線 ---
+
         async function connectBLE() {
             try {
-                console.log('正在請求藍牙設備...');
                 const device = await navigator.bluetooth.requestDevice({
                     filters: [{ name: 'Smart-Weight-Belt' }],
                     optionalServices: [SERVICE_UUID]
@@ -137,56 +277,25 @@
                 const service = await server.getPrimaryService(SERVICE_UUID);
                 bleCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
 
-                // 訂閱通知
                 await bleCharacteristic.startNotifications();
                 bleCharacteristic.addEventListener('characteristicvaluechanged', handleBLEData);
 
                 dotEl.classList.replace('bg-yellow-500', 'bg-green-500');
-                connTextEl.innerText = "已連線至硬體";
-                connectBtn.innerText = "斷開連線";
+                connTextEl.innerText = "連線成功";
+                connectBtn.innerText = "中斷硬體連線";
                 bleDevice = device;
-
-                speak("硬體已連線");
+                speak("藍牙連線成功，準備開始");
 
             } catch (error) {
-                console.error('連線失敗:', error);
                 dotEl.classList.replace('bg-yellow-500', 'bg-red-500');
                 connTextEl.innerText = "連線失敗";
-            }
-        }
-
-        function handleBLEData(event) {
-            const value = event.target.value;
-            // 讀取 Float32 (4 bytes)
-            const z = value.getFloat32(0, true); 
-            const absoluteZ = Math.abs(z);
-            
-            zEl.innerText = z.toFixed(2);
-
-            // 更新圖表
-            historyData.push(absoluteZ);
-            historyData.shift();
-            chart.update();
-
-            // 計數邏輯
-            if (absoluteZ > threshold && !goingUp) {
-                goingUp = true;
-                statusEl.innerText = '拉起中';
-                statusEl.classList.replace('text-yellow-500', 'text-green-400');
-            } else if (absoluteZ < (threshold - 2.5) && goingUp) {
-                goingUp = false;
-                count++;
-                counterEl.innerText = count;
-                statusEl.innerText = '已放下';
-                statusEl.classList.replace('text-green-400', 'text-yellow-500');
-                speak(count.toString());
+                showToast("藍牙連線取消");
             }
         }
 
         connectBtn.addEventListener('click', () => {
-            if (!bleDevice) {
-                connectBLE();
-            } else {
+            if (!bleDevice) connectBLE();
+            else {
                 bleDevice.gatt.disconnect();
                 bleDevice = null;
                 dotEl.classList.replace('bg-green-500', 'bg-red-500');
@@ -198,8 +307,11 @@
         resetBtn.addEventListener('click', () => {
             count = 0;
             counterEl.innerText = '0';
-            speak('重置');
+            speak('已重置次數');
         });
+
+        syncBtn.addEventListener('click', fetchSettings);
+        uploadBtn.addEventListener('click', uploadData);
 
         window.onload = initChart;
     </script>
